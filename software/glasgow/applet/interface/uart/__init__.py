@@ -206,6 +206,9 @@ class UARTApplet(GlasgowApplet):
         #     extra_pin_keys.append(key)
         #     extra_pin_pads.append(iface.get_pin(pin_num), name="extra-"+key)
             
+        self.mux_interface = iface = target.multiplexer.claim_interface(self, args)
+        self.pads = iface.get_pads(args, pins=self.__pins)
+
         extra_p, self.__addr_extra_p = target.registers.add_rw(2)
         if hasattr(self.pads, "extra_p"):
             self.m.d.comp += [
@@ -214,9 +217,9 @@ class UARTApplet(GlasgowApplet):
             ]
 
 
-        self.mux_interface = iface = target.multiplexer.claim_interface(self, args)
         subtarget = iface.add_subtarget(UARTSubtarget(
-            pads=iface.get_pads(args, pins=self.__pins),
+            extra_p=extra_p,
+            pads=self.pads,
             out_fifo=iface.get_out_fifo(),
             in_fifo=iface.get_in_fifo(),
             parity=args.parity,
@@ -332,6 +335,23 @@ class UARTApplet(GlasgowApplet):
                     break
 
                 if os.isatty(in_fileno):
+                    if oob_command_x_stage == 2:
+                        new_reg_val = None
+                        if data == b"0":
+                            new_reg_val = 0b10
+                        elif data == b"1":
+                            new_reg_val = 0b11
+                        elif data == b"z" or data == b"f":
+                            # z for high-z or f for floating.
+                            new_reg_val = 0b00
+                        else:
+                            self.logger.warning("Unknown extra pin state %s" % data.decode('ascii'))
+
+                        if new_reg_val is not None:
+                            self.logger.info("Setting extra_p to %d" % new_reg_val)
+                            await self.device.write_register(self.__addr_extra_p, new_reg_val)
+                        oob_command_x_stage = 0
+
                     if oob_command == 0 and data == b"\034":
                         oob_command = 1
                         continue
@@ -362,20 +382,7 @@ class UARTApplet(GlasgowApplet):
                         elif data == b"p":
                             oob_command_x_key = 'p'
                             oob_command_x_stage = 2
-                        elif oob_command_x_stage == 2:
-                            new_reg_val = None
-                            if data == b"0":
-                                new_reg_val = 0b10
-                            elif data == b"1":
-                                new_reg_val = 0b11
-                            elif data == b"z":
-                                new_reg_val = 0b00
-                            else:
-                                self.logger.warning("Unknown extra state "+data)
-
-                            self.logger.info("Setting extra_p to {new_reg_val}")
-                            await self.device.write_register(self.__addr_extra_p, new_reg_val)
-                            oob_command_x_stage = 0
+                            self.logger.info("got p command")
 
                         else:
                             self.logger.info("Ctrl+\\ ? for help")
