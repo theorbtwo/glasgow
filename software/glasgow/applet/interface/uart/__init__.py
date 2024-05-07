@@ -88,7 +88,7 @@ class UARTAutoBaud(Elaboratable):
 
 class UARTSubtarget(Elaboratable):
     def __init__(self, pads, out_fifo, in_fifo, parity, max_bit_cyc,
-                 manual_cyc, auto_cyc, use_auto, bit_cyc, rx_errors, invert_rx, invert_tx):
+                 manual_cyc, auto_cyc, use_auto, bit_cyc, rx_errors, invert_rx, invert_tx, extra_p):
         self.out_fifo = out_fifo
         self.in_fifo = in_fifo
         self.manual_cyc = manual_cyc
@@ -96,6 +96,7 @@ class UARTSubtarget(Elaboratable):
         self.use_auto = use_auto
         self.bit_cyc = bit_cyc
         self.rx_errors = rx_errors
+        self.extra_p = extra_p
 
         self.uart = UART(pads, bit_cyc=max_bit_cyc, parity=parity,
                          invert_rx=invert_rx, invert_tx=invert_tx)
@@ -147,7 +148,7 @@ class UARTApplet(GlasgowApplet):
     are present in received data.
     """
 
-    __pins = ("rx", "tx")
+    __pins = ("rx", "tx", "extra_p")
 
     @classmethod
     def add_build_arguments(cls, parser, access):
@@ -190,6 +191,28 @@ class UARTApplet(GlasgowApplet):
 
         bit_cyc,    self.__addr_bit_cyc    = target.registers.add_ro(32)
         rx_errors,  self.__addr_rx_errors  = target.registers.add_ro(16)
+
+        # extra_pin_regs  = []
+        # extra_pin_addrs = []
+        # extra_pin_keys  = []
+        # extra_pin_pads  = []
+
+        # for extra_pin_str in range(args.extra_pin):
+        #     key, pin_num = extra_pin_str(",")
+        #     reg, addr = target.registers.add_rw(2, reset=0)
+
+        #     extra_pin_regs.append(reg)
+        #     extra_pin_addrs.append(addr)
+        #     extra_pin_keys.append(key)
+        #     extra_pin_pads.append(iface.get_pin(pin_num), name="extra-"+key)
+            
+        extra_p, self.__addr_extra_p = target.registers.add_rw(2)
+        if hasattr(self.pads, "extra_p"):
+            self.m.d.comp += [
+                self.pads.extra_p.oe.eq((extra_p & 0b10) >> 1),
+                self.pads.extra_p.o.eq(extra_p & 1)
+            ]
+
 
         self.mux_interface = iface = target.multiplexer.claim_interface(self, args)
         subtarget = iface.add_subtarget(UARTSubtarget(
@@ -289,6 +312,8 @@ class UARTApplet(GlasgowApplet):
 
     async def _forward(self, in_fileno, out_fileno, uart, quit_sequence=False, stream=False):
         oob_command = 0
+        oob_command_x_stage = 0
+        oob_command_x_key = None
         dev_fut = uart_fut = None
         while True:
             if dev_fut is None:
@@ -334,6 +359,24 @@ class UARTApplet(GlasgowApplet):
                             if (lflag & termios.ECHO):
                                 echo = "on"
                             self.logger.info("Echo now "+echo)
+                        elif data == b"p":
+                            oob_command_x_key = 'p'
+                            oob_command_x_stage = 2
+                        elif oob_command_x_stage == 2:
+                            new_reg_val = None
+                            if data == b"0":
+                                new_reg_val = 0b10
+                            elif data == b"1":
+                                new_reg_val = 0b11
+                            elif data == b"z":
+                                new_reg_val = 0b00
+                            else:
+                                self.logger.warning("Unknown extra state "+data)
+
+                            self.logger.info("Setting extra_p to {new_reg_val}")
+                            await self.device.write_register(self.__addr_extra_p, new_reg_val)
+                            oob_command_x_stage = 0
+
                         else:
                             self.logger.info("Ctrl+\\ ? for help")
                             self.logger.info("Ctrl+\\ q to quit")
