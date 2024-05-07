@@ -219,6 +219,8 @@ class UARTApplet(GlasgowApplet):
             help="automatically estimate baud rate in response to RX errors")
 
     async def run(self, device, args):
+        self.device = device
+
         # Load the manually set baud rate.
         manual_cyc = self.derive_clock(
             input_hz=self.__sys_clk_freq, output_hz=args.baud,
@@ -262,6 +264,10 @@ class UARTApplet(GlasgowApplet):
             "socket", help="connect UART to a socket")
         ServerEndpoint.add_argument(p_socket, "endpoint")
 
+    async def baud(self):
+        bit_cyc = await self.device.read_register(self.__addr_bit_cyc, width=4)
+        return self.__sys_clk_freq // (bit_cyc + 1)
+
     async def _monitor_errors(self, device):
         cur_bit_cyc = await device.read_register(self.__addr_bit_cyc, width=4)
         cur_errors  = 0
@@ -276,14 +282,13 @@ class UARTApplet(GlasgowApplet):
 
             new_bit_cyc = await device.read_register(self.__addr_bit_cyc, width=4)
             if new_bit_cyc != cur_bit_cyc:
-                self.logger.info("switched to %d baud",
-                                 self.__sys_clk_freq // (new_bit_cyc + 1))
+                self.logger.info("switched to %d baud", await self.baud())
             cur_bit_cyc = new_bit_cyc
 
             await asyncio.sleep(1)
 
     async def _forward(self, in_fileno, out_fileno, uart, quit_sequence=False, stream=False):
-        quit = 0
+        oob_command = 0
         dev_fut = uart_fut = None
         while True:
             if dev_fut is None:
@@ -302,13 +307,43 @@ class UARTApplet(GlasgowApplet):
                     break
 
                 if os.isatty(in_fileno):
-                    if quit == 0 and data == b"\034":
-                        quit = 1
+                    if oob_command == 0 and data == b"\034":
+                        oob_command = 1
                         continue
-                    elif quit == 1 and data == b"q":
-                        break
-                    else:
-                        quit = 0
+                    elif oob_command == 1:
+                        if data == b"\034":
+                            # literal control-backslash
+                            oob_command = 0
+                        elif data == b"v":
+                            data = b"\x16"
+                            oob_command = 0
+                        elif data == b"q":
+                            break
+                        elif data == b"b":
+                            self.logger.info("Current baud rate %d bps", await self.baud())
+                        elif data == b"e":
+                            import termios
+
+                            ioattrs = termios.tcgetattr(sys.stdin)
+                            [iflag, oflag, cflag, lflag, ispeed, ospeed, cc] = ioattrs
+                            lflag ^= termios.ECHO
+                            ioattrs = [iflag, oflag, cflag, lflag, ispeed, ospeed, cc]
+                            termios.tcsetattr(in_fileno, termios.TCSADRAIN, ioattrs)
+
+                            echo = "off"
+                            if (lflag & termios.ECHO):
+                                echo = "on"
+                            self.logger.info("Echo now "+echo)
+                        else:
+                            self.logger.info("Ctrl+\\ ? for help")
+                            self.logger.info("Ctrl+\\ q to quit")
+                            self.logger.info("Ctrl+\\ e to toggle echo")
+                            self.logger.info("Ctrl+\\ b to show current (auto) baud")
+                            self.logger.info("Ctrl+\\ Ctrl+\\ to output literal control backslash")
+                            self.logger.info("Ctrl+\\ v to output control V")
+
+                        oob_command = 0
+
 
                 self.logger.trace("in->UART: <%s>", data.hex())
                 await uart.write(data)
@@ -344,7 +379,7 @@ class UARTApplet(GlasgowApplet):
             def restore_stdin_attrs():
                 termios.tcsetattr(in_fileno, termios.TCSADRAIN, old_stdin_attrs)
 
-            self.logger.info("running on a TTY; enter `Ctrl+\\ q` to quit")
+            self.logger.info("running on a TTY; enter `Ctrl+\\ q` to quit, ctrl+\\ ? for more commands")
 
         await self._forward(in_fileno, out_fileno, uart,
                             quit_sequence=True, stream=stream)
