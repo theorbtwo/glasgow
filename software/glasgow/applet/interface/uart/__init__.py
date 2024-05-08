@@ -88,7 +88,8 @@ class UARTAutoBaud(Elaboratable):
 
 class UARTSubtarget(Elaboratable):
     def __init__(self, pads, out_fifo, in_fifo, parity, max_bit_cyc,
-                 manual_cyc, auto_cyc, use_auto, bit_cyc, rx_errors, invert_rx, invert_tx, extra_p):
+                 manual_cyc, auto_cyc, use_auto, bit_cyc, rx_errors, invert_rx, invert_tx, extra_p_reg):
+        self.pads = pads
         self.out_fifo = out_fifo
         self.in_fifo = in_fifo
         self.manual_cyc = manual_cyc
@@ -96,7 +97,7 @@ class UARTSubtarget(Elaboratable):
         self.use_auto = use_auto
         self.bit_cyc = bit_cyc
         self.rx_errors = rx_errors
-        self.extra_p = extra_p
+        self.extra_p_reg = extra_p_reg
 
         self.uart = UART(pads, bit_cyc=max_bit_cyc, parity=parity,
                          invert_rx=invert_rx, invert_tx=invert_tx)
@@ -128,6 +129,11 @@ class UARTSubtarget(Elaboratable):
             uart.tx_ack.eq(self.out_fifo.r_rdy),
         ]
 
+        m.d.comb += [
+            self.pads.extra_p_t.oe.eq((self.extra_p_reg & 0b10) >> 1),
+            self.pads.extra_p_t.o.eq(self.extra_p_reg & 1)
+        ]
+        
         return m
 
 
@@ -192,6 +198,8 @@ class UARTApplet(GlasgowApplet):
         bit_cyc,    self.__addr_bit_cyc    = target.registers.add_ro(32)
         rx_errors,  self.__addr_rx_errors  = target.registers.add_ro(16)
 
+        extra_p_reg, self.__addr_extra_p   = target.registers.add_rw(2)
+
         # extra_pin_regs  = []
         # extra_pin_addrs = []
         # extra_pin_keys  = []
@@ -209,16 +217,8 @@ class UARTApplet(GlasgowApplet):
         self.mux_interface = iface = target.multiplexer.claim_interface(self, args)
         self.pads = iface.get_pads(args, pins=self.__pins)
 
-        extra_p, self.__addr_extra_p = target.registers.add_rw(2)
-        if hasattr(self.pads, "extra_p"):
-            self.m.d.comp += [
-                self.pads.extra_p.oe.eq((extra_p & 0b10) >> 1),
-                self.pads.extra_p.o.eq(extra_p & 1)
-            ]
-
-
         subtarget = iface.add_subtarget(UARTSubtarget(
-            extra_p=extra_p,
+            extra_p_reg=extra_p_reg,
             pads=self.pads,
             out_fifo=iface.get_out_fifo(),
             in_fifo=iface.get_in_fifo(),
